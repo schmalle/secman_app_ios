@@ -1,0 +1,103 @@
+# XcodeGen spec for the secman status app.
+#
+# The Xcode project is generated rather than committed. A .pbxproj is a
+# 2000-line file that no reviewer reads and every merge conflicts on; for a
+# security product that matters, because a build-setting change hidden in a
+# conflict resolution is exactly the sort of thing that should not slip by.
+#
+#   brew install xcodegen
+#   xcodegen generate
+#   open SecmanApp.xcodeproj
+#
+# Everything a reviewer needs to check — entitlements, ATS, minimum OS,
+# hardening flags — is in this file and Info.plist.
+
+name: SecmanApp
+options:
+  bundleIdPrefix: io.secman
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Treat warnings as errors in a security-relevant codebase: an ignored
+    # warning is how an unchecked optional or a deprecated crypto API survives.
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+    GCC_TREAT_WARNINGS_AS_ERRORS: true
+    ENABLE_USER_SCRIPT_SANDBOXING: true
+    CLANG_ENABLE_MODULE_VERIFIER: true
+    # Pointer authentication and control-flow integrity where the platform
+    # offers them.
+    ENABLE_HARDENED_RUNTIME: true
+  configs:
+    release:
+      SWIFT_COMPILATION_MODE: wholemodule
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      # Strip symbols from the shipped binary; the dSYM keeps them for crash
+      # reports.
+      DEPLOYMENT_POSTPROCESSING: true
+      STRIP_INSTALLED_PRODUCT: true
+      COPY_PHASE_STRIP: true
+      VALIDATE_PRODUCT: true
+
+packages:
+  SecmanRelayKit:
+    path: .
+
+targets:
+  SecmanApp:
+    type: application
+    platform: iOS
+    # iPhone and iPad from one target; the UI is a NavigationSplitView that
+    # collapses on compact width.
+    deploymentTarget: "26.0"
+    sources:
+      - path: App/SecmanApp
+    dependencies:
+      - package: SecmanRelayKit
+    info:
+      path: App/SecmanApp/Resources/Info.plist
+    entitlements:
+      path: App/SecmanApp/Resources/SecmanApp.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.secman.status
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # Portrait and landscape on iPad; the split view needs the width.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: >-
+          UIInterfaceOrientationPortrait
+          UIInterfaceOrientationPortraitUpsideDown
+          UIInterfaceOrientationLandscapeLeft
+          UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: >-
+          UIInterfaceOrientationPortrait
+          UIInterfaceOrientationLandscapeLeft
+          UIInterfaceOrientationLandscapeRight
+
+  SecmanAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/SecmanRelayKitTests
+    dependencies:
+      - target: SecmanApp
+      - package: SecmanRelayKit
+
+schemes:
+  SecmanApp:
+    build:
+      targets:
+        SecmanApp: all
+        SecmanAppTests: [test]
+    test:
+      targets:
+        - SecmanAppTests
+      # The Secure Enclave, biometrics and the browser sheets cannot be
+      # exercised in CI; the parts that can are pure logic and run here.
+      gatherCoverageData: true

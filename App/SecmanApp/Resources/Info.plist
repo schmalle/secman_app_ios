@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>secman</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!--
+      App Transport Security.
+
+      No exceptions, and TLS 1.3 required for the relay's own domain. The relay
+      supports 1.3; demanding it here means a downgrade to 1.2 by anything in
+      the path is a connection failure rather than a silent weakening.
+
+      Replace relay.example.com with the deployment's host. If the relay's host
+      is not known at build time, delete the NSExceptionDomains block entirely
+      rather than loosening it — the defaults already require TLS 1.2 with
+      forward secrecy, and a wildcard exception would be worse than no entry.
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>relay.example.com</key>
+            <dict>
+                <key>NSExceptionMinimumTLSVersion</key>
+                <string>TLSv1.3</string>
+                <key>NSExceptionRequiresForwardSecrecy</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <false/>
+            </dict>
+        </dict>
+    </dict>
+
+    <!--
+      Custom scheme for the relay-hosted GitHub flow. The relay redirects the
+      browser session to secman-relay://auth/github?ticket=... and
+      ASWebAuthenticationSession hands the URL back to the app.
+
+      A custom scheme is claimable by another app, which is why the ticket is
+      useless on its own: it is bound to this device's Secure Enclave key and
+      must be presented with a signature from it.
+    -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLName</key>
+            <string>io.secman.status.relay</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>secman-relay</string>
+            </array>
+        </dict>
+    </array>
+
+    <!--
+      Deployment configuration. Set SecmanRelayURL for a managed rollout so the
+      user never types a hostname; leave it empty for the in-app setup screen.
+    -->
+    <key>SecmanRelayURL</key>
+    <string></string>
+
+    <!-- iOS OAuth client id from the Google Cloud console. Empty disables the
+         Google button. Not a secret: an iOS OAuth client is a public client. -->
+    <key>SecmanGoogleClientID</key>
+    <string></string>
+
+    <!--
+      Optional certificate pinning: base64 SHA-256 of the relay certificate's
+      SubjectPublicKeyInfo. Leave the array empty unless you have a rotation
+      procedure — a Let's Encrypt key change with a stale pin locks out every
+      installed copy until an App Store release ships. Always list at least two.
+
+        openssl s_client -connect relay.example.com:443 </dev/null 2>/dev/null \
+          | openssl x509 -pubkey -noout \
+          | openssl pkey -pubin -outform der \
+          | openssl dgst -sha256 -binary | base64
+    -->
+    <key>SecmanRelayPublicKeyPins</key>
+    <array/>
+
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+
+    <key>NSFaceIDUsageDescription</key>
+    <string>secman uses Face ID to unlock this device's security key before showing status.</string>
+</dict>
+</plist>

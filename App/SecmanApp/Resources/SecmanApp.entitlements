@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Sign in with Apple. This is the only capability the app requests.
+
+      Deliberately absent: no App Groups (nothing to share), no Keychain
+      sharing (the device key must never be reachable from another app), no
+      push notifications (the app pulls; a push channel would be a second
+      inbound surface for no benefit), no background modes, no associated
+      domains.
+    -->
+    <key>com.apple.developer.applesignin</key>
+    <array>
+        <string>Default</string>
+    </array>
+</dict>
+</plist>

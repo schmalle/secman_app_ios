@@ -10,8 +10,8 @@ import Foundation
 ///  - Optional SPKI pinning. Off by default because a Let's Encrypt certificate
 ///    rotates every ~60 days and a pinned leaf would brick the app; on when the
 ///    operator supplies a pin set and accepts the rotation procedure.
-///  - No cookies, no credential store, no automatic redirects. The relay never
-///    redirects an API call, so following one could only ever help an attacker.
+///  - No cookies, no credential store, no redirects. The relay never redirects
+///    an API call, so following one could only ever help an attacker.
 ///  - The access token lives in memory only, and never in a URL.
 public actor RelayClient {
 
@@ -33,8 +33,27 @@ public actor RelayClient {
         }
     }
 
+    /// How a 503 should be read.
+    ///
+    /// The relay answers 503 for three unrelated situations — no snapshot has
+    /// been pushed yet, the device registry is full, and "cannot start a login
+    /// right now" — and only the first is the app's cheerful "waiting for
+    /// secman" state. Telling an admin whose registry is full that secman has
+    /// not pushed yet sends them to debug the wrong system.
+    private enum Unavailable {
+        case meansNoSnapshot
+        case meansServerBusy
+    }
+
+    /// The `body` argument for a GET. A named empty type rather than
+    /// `Optional<Never>.none`, which reads as a puzzle at every call site.
+    private struct EmptyBody: Encodable {}
+    private static let noBody: EmptyBody? = nil
+
     private let configuration: Configuration
-    private let session: URLSession
+    // nonisolated because `deinit` has to reach it, and deinit is not
+    // actor-isolated. URLSession is documented thread-safe and this is a `let`.
+    nonisolated(unsafe) private let session: URLSession
     private let decoder = RelayJSON.decoder
     private let encoder = RelayJSON.encoder
 
@@ -50,6 +69,7 @@ public actor RelayClient {
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.httpCookieAcceptPolicy = .never
+        config.httpShouldSetCookies = false
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -62,6 +82,13 @@ public actor RelayClient {
             delegate: RelayURLSessionDelegate(pins: configuration.publicKeyPins),
             delegateQueue: nil
         )
+    }
+
+    deinit {
+        // A URLSession with a delegate retains it until invalidated. Without
+        // this the delegate — and the session's operation queue — outlive the
+        // client for the life of the process.
+        session.finishTasksAndInvalidate()
     }
 
     // MARK: - Session state
@@ -86,7 +113,7 @@ public actor RelayClient {
     // MARK: - Discovery
 
     public func providers() async throws -> RelayProviders {
-        try await send(path: "/api/v1/providers", method: "GET", body: Optional<Never>.none, authenticated: false)
+        try await send(path: "/api/v1/providers", method: "GET", body: RelayClient.noBody, authenticated: false)
     }
 
     // MARK: - Sign-in
@@ -97,7 +124,8 @@ public actor RelayClient {
             path: "/api/v1/auth/nonce",
             method: "POST",
             body: Body(publicKey: publicKeyBase64),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -125,7 +153,8 @@ public actor RelayClient {
                 provider: provider, idToken: idToken, nonce: nonce,
                 publicKey: publicKeyBase64, signature: signatureBase64, deviceName: deviceName
             ),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -138,7 +167,8 @@ public actor RelayClient {
             path: "/api/v1/auth/github/start",
             method: "POST",
             body: Body(publicKey: publicKeyBase64, deviceName: deviceName),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -158,7 +188,8 @@ public actor RelayClient {
             path: "/api/v1/auth/github/complete",
             method: "POST",
             body: Body(ticket: ticket, publicKey: publicKeyBase64, signature: signatureBase64, deviceName: deviceName),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -176,7 +207,8 @@ public actor RelayClient {
             path: "/api/v1/enroll",
             method: "POST",
             body: Body(enrollmentCode: code, publicKey: publicKeyBase64, deviceName: deviceName),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -188,7 +220,8 @@ public actor RelayClient {
             path: "/api/v1/auth/challenge",
             method: "POST",
             body: Body(deviceId: deviceId),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
     }
 
@@ -203,7 +236,8 @@ public actor RelayClient {
             path: "/api/v1/auth/token",
             method: "POST",
             body: Body(deviceId: deviceId, nonce: nonce, signature: signatureBase64),
-            authenticated: false
+            authenticated: false,
+            unavailable: .meansServerBusy
         )
         store(token: token)
         return token
@@ -212,12 +246,21 @@ public actor RelayClient {
     // MARK: - Reads
 
     public func session() async throws -> RelaySession {
-        try await send(path: "/api/v1/session", method: "GET", body: Optional<Never>.none, authenticated: true)
+        try await send(path: "/api/v1/session", method: "GET", body: RelayClient.noBody, authenticated: true)
+    }
+
+    /// Freshness and entitlements without the payload — the cheap poll.
+    public func meta() async throws -> RelayMeta {
+        try await send(
+            path: "/api/v1/meta", method: "GET", body: RelayClient.noBody,
+            authenticated: true, unavailable: .meansNoSnapshot
+        )
     }
 
     public func status() async throws -> RelaySnapshot {
         let snapshot: RelaySnapshot = try await send(
-            path: "/api/v1/status", method: "GET", body: Optional<Never>.none, authenticated: true
+            path: "/api/v1/status", method: "GET", body: RelayClient.noBody,
+            authenticated: true, unavailable: .meansNoSnapshot
         )
         guard snapshot.schemaVersion == relaySupportedSnapshotSchemaVersion else {
             // Refuse rather than render half of it: a status screen that
@@ -231,13 +274,26 @@ public actor RelayClient {
         return snapshot
     }
 
+    /// The snapshot, or nil when the relay is healthy but secman has not pushed.
+    ///
+    /// "Waiting for secman" is a normal state on a freshly deployed relay, not
+    /// a failure, and modelling it as one forces every caller to catch.
+    public func statusIfAvailable() async throws -> RelaySnapshot? {
+        do {
+            return try await status()
+        } catch RelayError.noSnapshotYet {
+            return nil
+        }
+    }
+
     // MARK: - Transport
 
     private func send<Body: Encodable, Response: Decodable>(
         path: String,
         method: String,
         body: Body?,
-        authenticated: Bool
+        authenticated: Bool,
+        unavailable: Unavailable = .meansServerBusy
     ) async throws -> Response {
         var request = URLRequest(url: configuration.baseURL.appending(path: path))
         request.httpMethod = method
@@ -271,7 +327,7 @@ public actor RelayClient {
             do {
                 return try decoder.decode(Response.self, from: data)
             } catch {
-                throw RelayError.malformedResponse("could not decode \(Response.self)")
+                throw RelayError.malformedResponse("could not read the \(Response.self) the relay sent")
             }
         case 401:
             clearToken()
@@ -279,10 +335,15 @@ public actor RelayClient {
         case 403:
             throw RelayError.forbidden(message(from: data) ?? "This account is not permitted to use the app.")
         case 429:
-            let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+            let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0) }
             throw RelayError.rateLimited(retryAfter: retryAfter)
         case 503:
-            throw RelayError.noSnapshotYet
+            switch unavailable {
+            case .meansNoSnapshot:
+                throw RelayError.noSnapshotYet
+            case .meansServerBusy:
+                throw RelayError.http(status: 503, message: message(from: data))
+            }
         default:
             throw RelayError.http(status: http.statusCode, message: message(from: data))
         }
@@ -294,18 +355,20 @@ public actor RelayClient {
     }
 }
 
-/// TLS policy for the relay session.
+/// TLS and redirect policy for the relay session.
 ///
-/// Pinning is opt-in. When no pins are configured this delegate does nothing at
-/// all and the system's default validation (plus App Transport Security)
-/// applies — which is the right default for a relay using Let's Encrypt, where
-/// a pinned certificate would stop working at the next renewal.
+/// Pinning is opt-in. When no pins are configured the delegate leaves trust
+/// evaluation to the system (plus App Transport Security) — the right default
+/// for a relay using Let's Encrypt, where a pinned certificate would stop
+/// working at the next renewal.
 ///
 /// When pins *are* configured they are SPKI hashes, not certificate hashes, so
 /// a renewal that reuses the key keeps working. Supply at least two — the
 /// current key and a spare — or a forced key rotation locks every installed app
 /// out until an App Store release ships.
-final class RelayURLSessionDelegate: NSObject, URLSessionDelegate, Sendable {
+/// `@unchecked` only because the superclass is `NSObject`: the single stored
+/// property is an immutable `Set<String>`, so there is nothing to race on.
+final class RelayURLSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let pins: Set<String>
 
     init(pins: Set<String>) {
@@ -344,5 +407,22 @@ final class RelayURLSessionDelegate: NSObject, URLSessionDelegate, Sendable {
             }
         }
         return (.cancelAuthenticationChallenge, nil)
+    }
+
+    /// Refuses every redirect.
+    ///
+    /// No relay API route redirects — the one route that does,
+    /// `/auth/github/callback`, is reached by the browser and never by this
+    /// session. So a redirect here is either a misconfigured proxy or an
+    /// attempt to walk the app to another host, possibly carrying the
+    /// `Authorization` header with it. Returning nil delivers the 3xx to the
+    /// caller, which then fails as an unexpected status.
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        nil
     }
 }

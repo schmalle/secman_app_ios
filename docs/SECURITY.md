@@ -46,7 +46,8 @@ app                          relay                        Apple/Google
  ├─ authenticate, passing nonceHash ─────────────────────▶
  │   ◀────────────────────────────────── id_token {nonce: nonceHash, sub}
  │
- ├─ sign bindingInput with the enclave key   (Face ID)
+ ├─ derive bindingInput locally; refuse if the relay's copy differs
+ ├─ sign it with the enclave key   (Face ID)
  │
  ├─ POST /auth/oidc {provider, idToken, nonce, publicKey, signature} ──▶
  │                              1. redeem nonce (single use)
@@ -95,7 +96,8 @@ presented with a signature from that key.
 app                                   relay
  ├─ POST /auth/challenge {deviceId} ──▶
  │   ◀── {nonce, signingInput}
- ├─ sign signingInput   (Face ID)
+ ├─ derive signingInput locally; refuse if the relay's copy differs
+ ├─ sign it   (Face ID)
  ├─ POST /auth/token {deviceId, nonce, signature} ──▶
  │   ◀── {accessToken, expiresIn: 900, roles, scopes}
 ```
@@ -103,6 +105,34 @@ app                                   relay
 The identity provider is not consulted again. That keeps the app working when
 Apple is having a bad morning, and it means the durable credential is a key in
 hardware rather than a token on disk.
+
+### The app never signs bytes the relay chose
+
+`/auth/nonce` and `/auth/challenge` both return the exact string the device is
+expected to sign. It is a convenience — the format is easy to get subtly wrong —
+and the app treats it as something to *check*, never as an instruction.
+`RelayProtocol` rebuilds the string from values the app already holds, compares,
+and aborts on a mismatch.
+
+Signing the server's copy verbatim would turn the relay, or anyone who can
+answer as it, into a signing oracle for the one key that identifies the device.
+TLS makes that window narrow and the two context prefixes make a stolen
+signature useless for the other purpose, but neither is a reason to sign a blank
+cheque with a Secure Enclave key.
+
+### The biometric prompt is real
+
+`SecKeyCreateSignature` takes no `LAContext`, so a context that is not attached
+to the `SecKey` when it is fetched from the Keychain is silently ignored — the
+signature still succeeds behind the system's default prompt, and any wording the
+app thought it was showing never appears. `DeviceKeyStore.load(context:)` passes
+it as `kSecUseAuthenticationContext` for exactly this reason, with
+`touchIDAuthenticationAllowableReuseDuration = 0` so each new session costs a
+fresh check rather than inheriting a recent one.
+
+A missing key is an error, never a reason to generate one. Signing a challenge
+with a freshly minted key produces a signature no relay has ever seen, and the
+user gets an unexplained 403 instead of "this device is no longer registered".
 
 ## 4. Administrators must use a strong provider
 
@@ -141,6 +171,12 @@ An out-of-scope section, an out-of-role section and a nonexistent section all
 answer identically (403). The authorization boundary is not a map of what the
 relay holds.
 
+The app never filters. It lists exactly the section names the relay returned,
+including ones this build has no purpose-built view for — those render as
+labelled rows from the opaque JSON. That is deliberate: a client that filtered
+the server's answer through a hard-coded list would silently hide a section the
+user is entitled to, and the bug would look identical to a permissions problem.
+
 ## 6. Transport
 
 - HTTPS only. A plaintext relay URL is refused at configuration time, not at
@@ -154,7 +190,10 @@ relay holds.
   is on, it is an *addition* to the platform's chain validation, never a
   replacement.
 - No cookies, no credential store, no redirects followed. The relay never
-  redirects an API call, so following one could only help an attacker.
+  redirects an API call, so following one could only help an attacker — the
+  session delegate returns `nil` from `willPerformHTTPRedirection`, which is
+  what actually enforces it. A redirect the app followed would re-send the
+  `Authorization` header to wherever it pointed.
 
 ## 7. On-device data
 
@@ -167,6 +206,10 @@ relay holds.
 - The Keychain item is `WhenUnlockedThisDeviceOnly`: it does not travel in an
   iCloud backup and cannot confuse a restored device into thinking it is already
   enrolled.
+- Every Keychain and enclave call runs off the main actor. Beyond
+  responsiveness this is a correctness point: `SecKeyCreateSignature` on a
+  biometry-gated key blocks its thread for as long as the Face ID sheet is up,
+  and on the main actor that is a frozen app for the whole prompt.
 
 ## 8. What sign-out is not
 

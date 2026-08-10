@@ -44,6 +44,9 @@ public struct DeviceKeyStore: Sendable {
     // MARK: - Lifecycle
 
     /// Returns the existing key, creating one if this device has none.
+    ///
+    /// Only enrollment may create a key. Everything else uses `load()` and
+    /// fails loudly when the key is gone — see `sign(message:reason:)`.
     public func loadOrCreate() throws -> SecKey {
         if let existing = try load() {
             return existing
@@ -52,13 +55,24 @@ public struct DeviceKeyStore: Sendable {
     }
 
     /// Returns the existing key, or nil.
-    public func load() throws -> SecKey? {
-        let query: [String: Any] = [
+    ///
+    /// - Parameter context: when supplied, the keychain evaluates the key's
+    ///   access control against *this* context, which is the only way the
+    ///   biometric prompt shows our own wording rather than the system default.
+    ///   Passing it here rather than at signing time is not a style choice:
+    ///   `SecKeyCreateSignature` has no parameter for it, so a context that is
+    ///   not attached to the `SecKey` reference is simply ignored.
+    public func load(context: LAContext? = nil) throws -> SecKey? {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecReturnRef as String: true
         ]
+        if let context {
+            query[kSecUseAuthenticationContext as String] = context
+        }
+
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         switch status {
@@ -69,6 +83,8 @@ public struct DeviceKeyStore: Sendable {
             return (key as! SecKey)
         case errSecItemNotFound:
             return nil
+        case errSecUserCanceled, errSecAuthFailed:
+            throw RelayError.userCancelled
         default:
             throw RelayError.keychain(status: status, operation: "loading the device key")
         }
@@ -147,16 +163,11 @@ public struct DeviceKeyStore: Sendable {
     // MARK: - Public key
 
     /// The public key in the SPKI DER encoding the relay parses.
+    ///
+    /// Creates the key if this device has none, because the first caller is
+    /// always enrollment.
     public func publicKeyDER() throws -> Data {
-        let key = try loadOrCreate()
-        guard let publicKey = SecKeyCopyPublicKey(key) else {
-            throw RelayError.deviceKey("the device key has no public half")
-        }
-        var error: Unmanaged<CFError>?
-        guard let raw = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
-            throw RelayError.deviceKey("could not export the public key: \(cfErrorDescription(error))")
-        }
-        return try Self.spkiFromX963(raw)
+        try Self.publicKeyDER(of: try loadOrCreate())
     }
 
     /// Base64 SPKI, the form the relay's JSON expects.
@@ -164,47 +175,64 @@ public struct DeviceKeyStore: Sendable {
         try publicKeyDER().base64EncodedString()
     }
 
+    /// Lowercase hex SHA-256 of the SPKI DER.
+    ///
+    /// Mirrors `idp.Fingerprint` in the relay. It appears inside the binding
+    /// input the device signs, so the two implementations have to agree byte
+    /// for byte — see `RelayProtocol.bindingInput`.
+    public func publicKeyFingerprint() throws -> String {
+        SPKI.sha256Hex(try publicKeyDER())
+    }
+
+    private static func publicKeyDER(of key: SecKey) throws -> Data {
+        guard let publicKey = SecKeyCopyPublicKey(key) else {
+            throw RelayError.deviceKey("the device key has no public half")
+        }
+        var error: Unmanaged<CFError>?
+        guard let raw = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+            throw RelayError.deviceKey("could not export the public key: \(cfErrorDescription(error))")
+        }
+        return try spkiFromX963(raw)
+    }
+
     /// Wraps an ANSI X9.63 uncompressed P-256 point in a SubjectPublicKeyInfo.
     ///
-    /// The prefix is the fixed DER for
-    /// `SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING }`.
-    /// Because both the algorithm and the curve are pinned, the header is a
-    /// constant rather than something that has to be assembled — and any input
-    /// that is not a 65-byte uncompressed point is rejected instead of being
-    /// wrapped into a structure that would fail confusingly on the server.
+    /// Any input that is not a 65-byte uncompressed point is rejected rather
+    /// than wrapped into a structure that would fail confusingly on the server:
+    /// a compressed point produces a structurally valid but wrong SPKI.
     public static func spkiFromX963(_ x963: Data) throws -> Data {
         guard x963.count == 65, x963.first == 0x04 else {
             throw RelayError.deviceKey("expected a 65-byte uncompressed P-256 point, got \(x963.count) bytes")
         }
-        let header: [UInt8] = [
-            0x30, 0x59,                                            // SEQUENCE (89 bytes)
-            0x30, 0x13,                                            //   SEQUENCE (19 bytes)
-            0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,  //     OID 1.2.840.10045.2.1  (id-ecPublicKey)
-            0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, // OID 1.2.840.10045.3.1.7 (prime256v1)
-            0x03, 0x42, 0x00                                       //   BIT STRING (66 bytes, 0 unused)
-        ]
-        return Data(header) + x963
+        return try SPKI.ecSPKI(point: x963, bits: 256)
     }
 
     // MARK: - Signing
 
-    /// Signs `message` with the enclave key.
+    /// Signs `message` with the enclave key, behind a biometric prompt.
     ///
     /// The algorithm hashes the message with SHA-256 and produces an ASN.1 DER
     /// ECDSA signature, which is exactly what the relay verifies with
     /// `ecdsa.VerifyASN1` over `sha256(message)`.
     ///
+    /// A missing key is an error rather than a reason to make one. Signing with
+    /// a freshly minted key would produce a signature no relay has ever seen,
+    /// and the user would get an unexplained 403 instead of "this device is no
+    /// longer registered".
+    ///
     /// - Parameter reason: shown in the biometric prompt. Say what is being
     ///   authorised, not "authenticate" — the user is approving access to a
     ///   security dashboard and deserves to be told so.
     public func sign(message: Data, reason: String) throws -> Data {
-        let key = try loadOrCreate()
-
         let context = LAContext()
         context.localizedReason = reason
         // Force a fresh biometric check per signature rather than reusing a
         // recent one: each signature authorises a new session.
         context.touchIDAuthenticationAllowableReuseDuration = 0
+
+        guard let key = try load(context: context) else {
+            throw RelayError.deviceKey("this device's registration key is gone; register the device again")
+        }
 
         var error: Unmanaged<CFError>?
         guard let signature = SecKeyCreateSignature(
@@ -213,11 +241,13 @@ public struct DeviceKeyStore: Sendable {
             message as CFData,
             &error
         ) as Data? else {
-            let description = cfErrorDescription(error)
-            if description.localizedCaseInsensitiveContains("cancel") {
+            guard let failure = error?.takeRetainedValue() else {
+                throw RelayError.deviceKey("signing failed: unknown error")
+            }
+            if Self.isCancellation(failure) {
                 throw RelayError.userCancelled
             }
-            throw RelayError.deviceKey("signing failed: \(description)")
+            throw RelayError.deviceKey("signing failed: \((failure as Error).localizedDescription)")
         }
         return signature
     }
@@ -225,6 +255,22 @@ public struct DeviceKeyStore: Sendable {
     /// Signs and base64-encodes, the form every relay request uses.
     public func signBase64(message: String, reason: String) throws -> String {
         try sign(message: Data(message.utf8), reason: reason).base64EncodedString()
+    }
+
+    /// Whether a signing failure was the user dismissing the prompt.
+    ///
+    /// Matched on the error domain and code rather than on the localized
+    /// description, which is translated: a German device reports "Abbrechen",
+    /// and a substring search for "cancel" would turn every cancellation into
+    /// an alarming "signing failed" alert.
+    private static func isCancellation(_ error: CFError) -> Bool {
+        let nsError = error as Error as NSError
+        if nsError.domain == LAError.errorDomain {
+            return nsError.code == LAError.userCancel.rawValue
+                || nsError.code == LAError.appCancel.rawValue
+                || nsError.code == LAError.systemCancel.rawValue
+        }
+        return nsError.code == Int(errSecUserCanceled)
     }
 }
 

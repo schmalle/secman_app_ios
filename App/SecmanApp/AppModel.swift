@@ -7,9 +7,9 @@ import UIKit
 ///
 /// Everything the UI shows about *what the user may see* comes from the relay's
 /// `/api/v1/session` — never from a local role check. If the server says a
-/// section is not readable, the tab does not exist; if the server changes its
-/// mind, the next refresh changes the UI. That keeps the client from developing
-/// its own, inevitably divergent, opinion about authorization.
+/// section is not readable, it does not appear; if the server changes its mind,
+/// the next refresh changes the UI. That keeps the client from developing its
+/// own, inevitably divergent, opinion about authorization.
 @Observable
 @MainActor
 final class AppModel {
@@ -23,7 +23,12 @@ final class AppModel {
     }
 
     private(set) var phase: Phase = .loading
+    /// Who this device is. Fetched once per launch: a display name and a
+    /// binding method do not change between two pulls of the same list.
     private(set) var session: RelaySession?
+    /// Freshness and entitlements. Fetched on every refresh, because both can
+    /// change under the app — a role edit in secman, or a snapshot going stale.
+    private(set) var meta: RelayMeta?
     private(set) var snapshot: RelaySnapshot?
     private(set) var providers: RelayProviders?
     private(set) var availableMethods: [SignInMethod] = []
@@ -118,8 +123,9 @@ final class AppModel {
     func signOut() {
         do {
             try authenticator?.signOutLocally()
-            Task { await client?.clearToken() }
+            Task { [client] in await client?.clearToken() }
             session = nil
+            meta = nil
             snapshot = nil
             phase = .signedOut
         } catch {
@@ -134,24 +140,43 @@ final class AppModel {
         await refresh()
     }
 
+    /// Brings the screen up to date for the smallest number of bytes.
+    ///
+    /// `/meta` is a few hundred bytes and carries everything the shell needs:
+    /// how old the snapshot is, and which sections this device may read.
+    /// `/status` — the actual payload, and the only large response the app ever
+    /// downloads — is fetched only when `generatedAt` has moved since the copy
+    /// already in memory. On a phone that wakes up several times an hour behind
+    /// a relay secman pushes to every fifteen minutes, most refreshes are the
+    /// small request alone.
     func refresh() async {
         guard let client, let authenticator else { return }
+        guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
         do {
             try await authenticator.ensureSession()
-            // Session first: it tells us which sections are readable, and the
-            // answer may have changed since the last launch because somebody's
-            // roles changed in secman.
-            session = try await client.session()
-            snapshot = try await client.status()
-            phase = .signedIn
-        } catch RelayError.noSnapshotYet {
-            // The relay is healthy but secman has not pushed yet. Show the
-            // shell with an explanatory empty state rather than an error.
-            session = try? await client.session()
-            snapshot = nil
+
+            if session == nil {
+                session = try await client.session()
+            }
+
+            do {
+                let latest = try await client.meta()
+                let unchanged = latest.instanceId == snapshot?.instanceId
+                    && latest.generatedAt == snapshot?.generatedAt
+                meta = latest
+                if !unchanged {
+                    snapshot = try await client.statusIfAvailable()
+                }
+            } catch RelayError.noSnapshotYet {
+                // The relay is healthy but secman has not pushed. Show the
+                // shell with an explanatory empty state rather than an error.
+                meta = nil
+                snapshot = nil
+            }
+
             phase = .signedIn
         } catch RelayError.unauthenticated {
             phase = .signedOut
@@ -161,7 +186,9 @@ final class AppModel {
             alert = message
             phase = .signedOut
         } catch RelayError.userCancelled {
-            phase = .signedOut
+            // The user dismissed Face ID. Keep whatever is on screen; nagging
+            // with an alert they just declined helps nobody.
+            if session == nil { phase = .signedOut }
         } catch {
             present(error)
             if session == nil { phase = .signedOut }
@@ -169,9 +196,14 @@ final class AppModel {
     }
 
     /// The sections this device may read, in a stable display order.
-    var visibleSections: [RelaySection] {
-        guard let session else { return [] }
-        return RelaySection.allCases.filter { session.sections.contains($0.rawValue) }
+    ///
+    /// Taken from the relay's answer and only *ordered* locally. A section this
+    /// build has never heard of still appears — see `RelaySectionID`.
+    var visibleSections: [RelaySectionID] {
+        // /meta is the fresher of the two and reflects a role change a refresh
+        // earlier than the once-per-launch /session would.
+        let names = meta?.sections ?? session?.sections ?? []
+        return names.map(RelaySectionID.init).sorted()
     }
 
     // MARK: - Helpers

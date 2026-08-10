@@ -119,6 +119,11 @@ public struct DeviceRecordStore: Sendable {
 /// deliberate: it keeps a phone usable when Apple is having a bad morning, and
 /// it means the long-lived credential is a key in hardware rather than a token
 /// on disk.
+///
+/// The type is `@MainActor` because it is driven from the UI, but every
+/// Keychain and Secure Enclave call is pushed off it. `SecKeyCreateSignature`
+/// on a biometry-gated key blocks its thread for as long as the Face ID sheet
+/// is up; on the main actor that is a frozen app for the entire prompt.
 @MainActor
 public final class RelayAuthenticator {
 
@@ -143,6 +148,25 @@ public final class RelayAuthenticator {
         try? records.load()
     }
 
+    // MARK: - Off-main key work
+
+    /// Runs a blocking Keychain / Secure Enclave call away from the main actor.
+    ///
+    /// `DeviceKeyStore` is a `Sendable` value holding only a tag, so handing it
+    /// to a detached task copies nothing that matters.
+    private func withKeys<T: Sendable>(_ work: @Sendable @escaping (DeviceKeyStore) throws -> T) async throws -> T {
+        let keys = self.keys
+        return try await Task.detached(priority: .userInitiated) { try work(keys) }.value
+    }
+
+    private func publicKeyBase64() async throws -> String {
+        try await withKeys { try $0.publicKeyBase64() }
+    }
+
+    private func sign(_ message: String, reason: String) async throws -> String {
+        try await withKeys { try $0.signBase64(message: message, reason: reason) }
+    }
+
     /// What this relay allows, so the UI can offer only what will work.
     public func availableMethods() async throws -> (providers: RelayProviders, methods: [SignInMethod]) {
         let providers = try await client.providers()
@@ -159,17 +183,15 @@ public final class RelayAuthenticator {
     /// Binds this device using an Apple or Google identity token.
     @discardableResult
     public func bind(provider: String, identityTokenProvider: (RelayLoginNonce) async throws -> String) async throws -> RelayBinding {
-        let publicKey = try keys.publicKeyBase64()
+        let publicKey = try await publicKeyBase64()
         let nonce = try await client.loginNonce(publicKeyBase64: publicKey)
         let idToken = try await identityTokenProvider(nonce)
 
         // Proof of possession. The relay already bound the nonce to this key's
         // fingerprint; the signature proves we hold the private half, so a
         // captured identity token cannot register somebody else's key.
-        let signature = try keys.signBase64(
-            message: nonce.bindingInput,
-            reason: "Register this device for secman"
-        )
+        let input = try await bindingInput(for: nonce.nonce, proposedBy: nonce.bindingInput)
+        let signature = try await sign(input, reason: "Register this device for secman")
 
         let binding = try await client.bindWithIDToken(
             provider: provider,
@@ -186,7 +208,7 @@ public final class RelayAuthenticator {
     /// Binds this device through the relay-hosted GitHub flow.
     @discardableResult
     public func bindWithGitHub(ticketProvider: (URL) async throws -> String) async throws -> RelayBinding {
-        let publicKey = try keys.publicKeyBase64()
+        let publicKey = try await publicKeyBase64()
         let start = try await client.startGitHubSignIn(publicKeyBase64: publicKey, deviceName: deviceName)
         guard let url = URL(string: start.authorizationUrl), url.scheme?.lowercased() == "https" else {
             throw RelayError.signIn("The relay returned an unusable authorization URL.")
@@ -194,11 +216,11 @@ public final class RelayAuthenticator {
 
         let ticket = try await ticketProvider(url)
         // The GitHub binding signs the ticket, not the state: the state travels
-        // through the browser and must not double as the challenge.
-        let signature = try keys.signBase64(
-            message: bindingInput(for: ticket),
-            reason: "Register this device for secman"
-        )
+        // through the browser and must not double as the challenge. The relay
+        // has nothing to propose here — at /start the ticket does not exist yet
+        // — so this is derived with nothing to check it against.
+        let input = try await bindingInput(for: ticket, proposedBy: nil)
+        let signature = try await sign(input, reason: "Register this device for secman")
 
         let binding = try await client.completeGitHubSignIn(
             ticket: ticket,
@@ -213,7 +235,7 @@ public final class RelayAuthenticator {
     /// Binds this device with an admin-issued enrollment code.
     @discardableResult
     public func bind(enrollmentCode: String) async throws -> RelayBinding {
-        let publicKey = try keys.publicKeyBase64()
+        let publicKey = try await publicKeyBase64()
         let binding = try await client.enrol(
             code: enrollmentCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
             publicKeyBase64: publicKey,
@@ -223,15 +245,20 @@ public final class RelayAuthenticator {
         return binding
     }
 
-    /// The binding input for a value the relay did not spell out for us.
+    /// The binding input to sign, derived locally and checked against the
+    /// relay's own copy when it sent one.
     ///
-    /// Mirrors `auth.DeviceBindingInput` in the relay. Kept in one place so the
-    /// two implementations can be diffed by eye.
-    func bindingInput(for nonce: String) throws -> String {
-        let fingerprint = try SHA256Digest.hash(keys.publicKeyDER())
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return "secman-relay-device-bind-v1|\(nonce)|\(fingerprint)"
+    /// See `RelayProtocol` for why the server's value is a cross-check rather
+    /// than the thing that gets signed.
+    func bindingInput(for nonce: String, proposedBy proposed: String?) async throws -> String {
+        let derived = RelayProtocol.bindingInput(
+            nonce: nonce,
+            keyFingerprint: try await withKeys { try $0.publicKeyFingerprint() }
+        )
+        guard RelayProtocol.agrees(derived: derived, proposed: proposed) else {
+            throw RelayError.signIn("The relay asked this device to sign something unexpected.")
+        }
+        return derived
     }
 
     // MARK: - Sessions
@@ -246,10 +273,11 @@ public final class RelayAuthenticator {
         guard let record = try records.load() else { throw RelayError.unauthenticated }
 
         let challenge = try await client.challenge(deviceId: record.deviceId)
-        let signature = try keys.signBase64(
-            message: challenge.signingInput,
-            reason: "Unlock secman status"
-        )
+        let derived = RelayProtocol.signingInput(deviceId: record.deviceId, nonce: challenge.nonce)
+        guard RelayProtocol.agrees(derived: derived, proposed: challenge.signingInput) else {
+            throw RelayError.signIn("The relay asked this device to sign something unexpected.")
+        }
+        let signature = try await sign(derived, reason: "Unlock secman status")
         try await client.exchange(
             deviceId: record.deviceId,
             nonce: challenge.nonce,

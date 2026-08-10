@@ -75,20 +75,25 @@ does the same: `RelaySnapshot.sections` is `[String: Data]`, decoded lazily by
 whichever view needs it.
 
 The result is that adding a field in secman, or a whole new section, cannot
-break a screen the user is looking at. An unknown section is simply not
-rendered; a new field in a known section is ignored until the app learns about
-it. Neither the relay nor the app needs a release when secman gains a widget.
+break a screen the user is looking at. A new field in a known section is ignored
+until the app learns about it; an unknown section is listed under its own name
+and rendered as labelled rows. Neither the relay nor the app needs a release
+when secman gains a widget.
 
 ### The UI is built from the server's answer
 
-`GET /api/v1/session` returns the sections this device may read. The sidebar is
-that list. There is no client-side role check anywhere — no `if roles.contains
-("ADMIN")` — because a second implementation of an authorization rule is a
-second chance to get it wrong, and the client's copy is the one an attacker
-controls.
+`GET /api/v1/meta` returns the sections this device may read. The sidebar is
+that list — all of it, unfiltered. There is no client-side role check anywhere —
+no `if roles.contains("ADMIN")` — because a second implementation of an
+authorization rule is a second chance to get it wrong, and the client's copy is
+the one an attacker controls.
 
-`RelaySection.explanatoryRoles` exists only to write sentences like "this needs
-SECCHAMPION". It never decides anything.
+Unfiltered includes section names this build has never seen. `RelaySection` maps
+the six secman publishes today to a title, an icon and a purpose-built view;
+`RelaySectionID` wraps whatever the server actually said, and anything without a
+match renders generically from the opaque JSON. Dropping the unrecognised ones
+would hide data the user is entitled to, and the resulting blank space is
+indistinguishable from a permissions problem.
 
 ## Data flow of one refresh
 
@@ -96,12 +101,21 @@ SECCHAMPION". It never decides anything.
 AppModel.refresh()
  ├─ RelayAuthenticator.ensureSession()
  │    └─ if the token is expired: challenge → sign (Face ID) → token
- ├─ GET /api/v1/session   → which sections, which roles   → sidebar
+ ├─ GET /api/v1/session   → identity: name, provider     → settings
+ │                          (first refresh only — it does not change)
+ ├─ GET /api/v1/meta      → freshness, which sections     → sidebar
  └─ GET /api/v1/status    → the sections themselves       → detail
+      only when meta.generatedAt has moved since the copy in memory
 ```
 
-`session` is fetched first on purpose: it may have changed since the last
-launch, because somebody's roles changed in secman.
+Only the first request in a steady-state refresh is guaranteed to happen.
+`/session` carries identity — a display name and how the device was bound —
+which does not change while the app is running, so it is fetched once. `/meta`
+is a few hundred bytes and is fetched every time, because both freshness and
+entitlements move underneath the app: a snapshot ages, and a role edit in secman
+takes effect on the very next request. `/status` is the only large response the
+app ever downloads, and it is skipped entirely when `generatedAt` matches the
+copy already in memory.
 
 ## Failure states, and why each is distinct
 

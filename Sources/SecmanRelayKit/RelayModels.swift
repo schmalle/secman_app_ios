@@ -44,9 +44,13 @@ public struct RelayLoginNonce: Codable, Sendable {
     /// hashing convention subtly wrong.
     public let nonceHash: String
     public let expiresAt: Date
-    /// The exact byte string the device key must sign to complete the binding.
-    public let bindingInput: String
-    public let algorithm: String
+    /// The byte string the relay expects the device key to sign.
+    ///
+    /// Advisory. The app derives the same string with `RelayProtocol` and
+    /// refuses the binding if the two disagree — see that type for why signing
+    /// the server's copy directly would be a mistake.
+    public let bindingInput: String?
+    public let algorithm: String?
 }
 
 /// The result of binding a device: who the relay thinks we are.
@@ -65,8 +69,9 @@ public struct RelayBinding: Codable, Sendable, Equatable {
 public struct RelayChallenge: Codable, Sendable {
     public let nonce: String
     public let expiresAt: Date
-    public let signingInput: String
-    public let algorithm: String
+    /// Advisory, like `RelayLoginNonce.bindingInput`.
+    public let signingInput: String?
+    public let algorithm: String?
 }
 
 /// `POST /api/v1/auth/token` — a short-lived access token.
@@ -80,6 +85,11 @@ public struct RelayToken: Codable, Sendable {
 }
 
 /// `POST /api/v1/auth/github/start`
+///
+/// The relay's `bindingInput` field is deliberately *not* modelled: it carries
+/// the literal text "issued with the ticket", because at this point in the flow
+/// the value to sign does not exist yet. The app derives it from the ticket the
+/// browser round trip returns.
 public struct RelayGitHubStart: Codable, Sendable {
     public let authorizationUrl: String
     public let state: String
@@ -96,10 +106,32 @@ public struct RelaySession: Codable, Sendable, Equatable {
     public let scopes: [String]
     public let boundVia: String
     public let provider: String?
-    /// The sections this device may read. The app builds its tab list from
+    /// The sections this device may read. The app builds its section list from
     /// this rather than from a local guess, so a role change on the server
     /// changes the UI without an app update.
     public let sections: [String]
+}
+
+/// `GET /api/v1/meta` — freshness and entitlements, without the payload.
+///
+/// The cheap poll. Everything the shell of the UI needs (is the data stale, how
+/// old is it, which sections may this device read) at a fraction of the bytes
+/// of a full `/status`, which matters on a phone that wakes up on cellular.
+public struct RelayMeta: Codable, Sendable, Equatable {
+    public let instanceId: String
+    public let schemaVersion: Int
+    public let generatedAt: Date
+    public let receivedAt: Date
+    public let ageSeconds: Int
+    public let stale: Bool
+    /// The relay's staleness threshold, so the UI can say "older than 15
+    /// minutes" using the deployment's own number rather than a guess.
+    public let maxAgeSeconds: Int
+    public let sections: [String]
+    public let deviceId: String
+    public let subject: String
+    public let roles: [String]
+    public let scopes: [String]
 }
 
 /// `GET /api/v1/status` — the snapshot, filtered to what this device may read.
@@ -120,6 +152,15 @@ public struct RelaySnapshot: Sendable {
     public func decode<T: Decodable>(_ type: T.Type, section: String, using decoder: JSONDecoder = RelayJSON.decoder) throws -> T? {
         guard let data = sections[section] else { return nil }
         return try decoder.decode(T.self, from: data)
+    }
+
+    /// One section as generic JSON, for a section this build has no type for.
+    ///
+    /// This is what lets the relay grow a section without an app release: the
+    /// UI renders whatever arrives as labelled rows instead of hiding it.
+    public func value(section: String) -> RelayJSONValue? {
+        guard let data = sections[section] else { return nil }
+        return try? RelayJSON.decoder.decode(RelayJSONValue.self, from: data)
     }
 }
 
@@ -152,26 +193,35 @@ struct RelayRawJSON: Decodable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         let value = try container.decode(RelayJSONValue.self)
-        data = try JSONEncoder().encode(value)
+        data = try RelayJSON.rawEncoder.encode(value)
     }
 }
 
-/// A minimal `any JSON` representation, used only to round-trip an opaque
-/// section back into `Data`.
-indirect enum RelayJSONValue: Codable {
+/// A minimal `any JSON` representation.
+///
+/// Used to round-trip an opaque section back into `Data`, and to render a
+/// section this build has no concrete type for.
+public indirect enum RelayJSONValue: Codable, Sendable, Equatable {
     case null
     case bool(Bool)
+    /// Integers are kept distinct from `number` on purpose. Everything the
+    /// relay carries in this position is a count — assets, vulnerabilities,
+    /// servers processed — and routing those through `Double` renders 1234 as
+    /// "1234.0" and loses precision past 2^53.
+    case int(Int)
     case number(Double)
     case string(String)
     case array([RelayJSONValue])
     case object([String: RelayJSONValue])
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -185,15 +235,28 @@ indirect enum RelayJSONValue: Codable {
         }
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .null: try container.encodeNil()
         case .bool(let value): try container.encode(value)
+        case .int(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
         case .string(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
         case .object(let value): try container.encode(value)
+        }
+    }
+
+    /// A short single-line rendering, for the generic section view.
+    public var displayText: String? {
+        switch self {
+        case .null: return "—"
+        case .bool(let value): return value ? "yes" : "no"
+        case .int(let value): return value.formatted()
+        case .number(let value): return value.formatted()
+        case .string(let value): return value
+        case .array, .object: return nil
         }
     }
 }
@@ -261,11 +324,14 @@ public struct RelayTopListSection: Codable, Sendable {
 
 // MARK: - Section identifiers
 
-/// The section names the relay serves, and the roles secman gates them behind.
+/// The sections `RelaySnapshotBuilder` publishes today, and the roles secman
+/// gates them behind.
 ///
-/// The role lists are for explanatory UI only ("you need SECCHAMPION to see
-/// this"). Authorization happens on the relay; this table never decides
-/// anything.
+/// This table is presentation only — an icon and a title. It decides nothing:
+/// authorization happens on the relay, and a section missing from this enum
+/// still appears in the UI via the generic renderer. See `RelaySectionID`. The
+/// role each section requires is documented in `docs/API.md`; it is not
+/// mirrored here, because a copy the app never consults is a copy that drifts.
 public enum RelaySection: String, CaseIterable, Sendable {
     case totals
     case kpis
@@ -285,11 +351,56 @@ public enum RelaySection: String, CaseIterable, Sendable {
         }
     }
 
-    public var explanatoryRoles: [String] {
+    public var symbolName: String {
         switch self {
-        case .totals, .topProducts, .topServers: return ["ADMIN"]
-        case .kpis, .exceptions: return ["ADMIN", "SECCHAMPION"]
-        case .imports: return ["ADMIN", "VULN"]
+        case .totals: return "square.grid.2x2"
+        case .kpis: return "gauge.with.needle"
+        case .exceptions: return "exclamationmark.triangle"
+        case .imports: return "arrow.down.circle"
+        case .topProducts: return "shippingbox"
+        case .topServers: return "server.rack"
+        }
+    }
+}
+
+/// A section the relay says this device may read.
+///
+/// The name comes from the server, always. `known` is non-nil for the six
+/// sections this build renders with a purpose-built view; for anything else the
+/// app still lists it and still shows its contents, just generically. That is
+/// the difference between "the relay grew a section" being a release and being
+/// a refresh.
+public struct RelaySectionID: Hashable, Sendable, Identifiable, Comparable {
+    public let name: String
+    public var id: String { name }
+
+    public init(_ name: String) {
+        self.name = name
+    }
+
+    public var known: RelaySection? { RelaySection(rawValue: name) }
+
+    public var displayName: String {
+        if let known { return known.displayName }
+        // "top-products" -> "Top products". Good enough for a name the app has
+        // never heard of, and better than showing the raw key.
+        let spaced = name.replacingOccurrences(of: "-", with: " ")
+        return spaced.prefix(1).uppercased() + spaced.dropFirst()
+    }
+
+    public var symbolName: String { known?.symbolName ?? "doc.text" }
+
+    /// Known sections first, in the canonical order above; then anything new,
+    /// alphabetically. A stable order matters more than a clever one: the
+    /// sidebar should not reshuffle between refreshes.
+    public static func < (lhs: RelaySectionID, rhs: RelaySectionID) -> Bool {
+        switch (lhs.known, rhs.known) {
+        case let (l?, r?):
+            let all = RelaySection.allCases
+            return all.firstIndex(of: l)! < all.firstIndex(of: r)!
+        case (_?, nil): return true
+        case (nil, _?): return false
+        case (nil, nil): return lhs.name < rhs.name
         }
     }
 }
@@ -297,38 +408,64 @@ public enum RelaySection: String, CaseIterable, Sendable {
 // MARK: - JSON
 
 public enum RelayJSON {
-    /// The relay emits RFC 3339 with fractional seconds on some fields and
-    /// without on others, so both are accepted rather than one being assumed.
-    public static let decoder: JSONDecoder = {
+    /// Shared coders.
+    ///
+    /// `nonisolated(unsafe)` rather than a fresh instance per call: these are
+    /// configured once and never mutated afterwards, which is the condition
+    /// under which `JSONDecoder` is safe to share, and a snapshot re-encodes up
+    /// to 64 opaque section bodies per refresh.
+    nonisolated(unsafe) public static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let text = try container.decode(String.self)
-            if let date = iso8601WithFraction.date(from: text) ?? iso8601.date(from: text) {
-                return date
+            guard let date = parseRFC3339(text) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "not an RFC 3339 timestamp")
             }
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "not an RFC 3339 timestamp: \(text)")
+            return date
         }
         return decoder
     }()
 
-    public static let encoder: JSONEncoder = {
+    nonisolated(unsafe) public static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }()
 
-    private static let iso8601WithFraction: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+    nonisolated(unsafe) static let rawEncoder = JSONEncoder()
 
-    private static let iso8601: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
+    private static let iso8601WithFraction = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let iso8601 = Date.ISO8601FormatStyle()
+
+    /// Parses the timestamps the relay emits.
+    ///
+    /// Go marshals `time.Time` as RFC 3339 *Nano* with trailing zeros trimmed,
+    /// so the same field arrives as `...:00Z`, `...:00.5Z` or
+    /// `...:00.123456789Z` depending on the instant. `ISO8601FormatStyle` is
+    /// specified for milliseconds, so anything else is normalised to three
+    /// fractional digits and retried — a status screen should not go blank
+    /// because a timestamp happened to land on a nanosecond boundary.
+    static func parseRFC3339(_ text: String) -> Date? {
+        if let date = try? iso8601WithFraction.parse(text) { return date }
+        if let date = try? iso8601.parse(text) { return date }
+        guard let normalized = normalizingFraction(text) else { return nil }
+        return try? iso8601WithFraction.parse(normalized)
+    }
+
+    /// Rewrites the fractional-seconds part to exactly three digits.
+    static func normalizingFraction(_ text: String) -> String? {
+        guard let dot = text.firstIndex(of: ".") else { return nil }
+        let afterDot = text.index(after: dot)
+        guard let end = text[afterDot...].firstIndex(where: { !$0.isNumber }) else { return nil }
+
+        let digits = text[afterDot..<end]
+        guard !digits.isEmpty else { return nil }
+        let millis = digits.count >= 3
+            ? String(digits.prefix(3))
+            : String(digits) + String(repeating: "0", count: 3 - digits.count)
+        return String(text[..<afterDot]) + millis + String(text[end...])
+    }
 }
 
 /// The shape every relay error uses.

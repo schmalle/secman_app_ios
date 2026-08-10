@@ -27,6 +27,23 @@ sees the KPIs; an `ADMIN` sees everything. Nothing is filtered on the device —
 the app asks the relay which sections it may read and builds the UI from the
 answer, so a role change in secman changes the app on the next refresh.
 
+That holds for sections the app has never heard of, too. The six secman
+publishes today get purpose-built screens; anything else is listed under its own
+name and rendered as labelled rows straight from the JSON. A client that quietly
+dropped what it did not recognise would hide data the user is entitled to, and
+the bug would be indistinguishable from a permissions problem.
+
+## Light on the wire
+
+Steady-state refresh is one small request. `GET /api/v1/meta` is a few hundred
+bytes and carries what the shell needs — how old the snapshot is, which sections
+are readable — and the full `/status` payload is fetched only when the relay's
+`generatedAt` has actually moved. secman pushes every fifteen minutes or so and
+a phone wakes up rather more often than that, so most refreshes never download
+the snapshot at all.
+
+Nothing is persisted: no snapshot on disk, no access token, no cache.
+
 ## Signing in
 
 | Method | Who can use it | What the relay does |
@@ -104,6 +121,23 @@ The relay itself is documented in the secman repository at `docs/RELAY.md`.
 
 ## Status
 
-The Swift sources have not been compiled: they were authored in an environment
-with no Swift toolchain and no Xcode. Treat the first `xcodegen generate &&
-swift build` as part of review, not as a formality.
+**The Swift sources have not been compiled.** They were authored in an
+environment with no Swift toolchain and no Xcode, so the first
+`xcodegen generate && swift build` is part of review, not a formality. The
+protocol is not guesswork — every wire format, signing input and status code
+here was read out of `src/relay` in the secman repository — but "matches the
+server" and "compiles" are different claims and only the first has been checked.
+
+### One thing to fix on the relay side
+
+`src/relay/internal/model/model.go` validates `ExternalIdentity.Provider`
+against `apple` and `github` only, while secman's `RelayIdentity.Provider`
+also allows `google` and lists it as a *strong* provider for privileged
+accounts. A control document linking any Google account is therefore rejected
+whole, which fails the entire push rather than one identity — so Google sign-in
+cannot currently resolve to a principal even on a relay configured with a Google
+verifier.
+
+Nothing in this app can work around that, and nothing here tries to: the sign-in
+buttons come from `GET /api/v1/providers`, so if an operator enables Google the
+button appears. The fix belongs in the relay's provider vocabulary.

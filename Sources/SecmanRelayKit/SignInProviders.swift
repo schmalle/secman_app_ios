@@ -44,6 +44,10 @@ public enum SignInMethod: String, Sendable, CaseIterable {
 public final class AppleSignInController: NSObject {
 
     private var continuation: CheckedContinuation<ASAuthorizationAppleIDCredential, Error>?
+    /// `ASAuthorizationController` does not keep itself alive while a request is
+    /// in flight; a local would be deallocated before the delegate fires and the
+    /// continuation would never resume, hanging the sign-in for good.
+    private var controller: ASAuthorizationController?
     private weak var presentationAnchor: ASPresentationAnchor?
 
     public init(presentationAnchor: ASPresentationAnchor?) {
@@ -55,6 +59,12 @@ public final class AppleSignInController: NSObject {
     /// - Parameter nonceHash: `RelayLoginNonce.nonceHash`, i.e. SHA-256 hex of
     ///   the raw nonce the relay issued for this device key.
     public func identityToken(nonceHash: String) async throws -> String {
+        guard continuation == nil else {
+            // Two concurrent runs would clobber each other's continuation, and
+            // a continuation that is dropped rather than resumed is a task that
+            // never finishes.
+            throw RelayError.signIn("A sign-in is already in progress.")
+        }
         let provider = ASAuthorizationAppleIDProvider()
         let request = provider.createRequest()
         // No scopes are requested. The relay identifies a user by the stable
@@ -64,11 +74,13 @@ public final class AppleSignInController: NSObject {
         request.requestedScopes = []
         request.nonce = nonceHash
 
+        defer { self.controller = nil }
         let credential: ASAuthorizationAppleIDCredential = try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
             let controller = ASAuthorizationController(authorizationRequests: [request])
             controller.delegate = self
             controller.presentationContextProvider = self
+            self.controller = controller
             controller.performRequests()
         }
 

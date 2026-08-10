@@ -21,11 +21,36 @@ sending and the server silently dropped is how contract drift becomes invisible.
 | 403 | not permitted | **do not retry** — a human must change something in secman |
 | 404 / 405 | no such route or method | bug |
 | 429 | rate limited | honour `Retry-After` |
-| 503 | no snapshot yet, or the relay is not ready | show the waiting state |
+| 503 | on a read: no snapshot yet. Elsewhere: the relay is busy or its device registry is full | waiting state on a read; a plain error otherwise |
 
 401 and 403 mean genuinely different things and the app treats them
 differently. Conflating them produces a sign-in sheet that loops forever against
 a revoked device.
+
+503 is likewise overloaded on the relay side and must be read per route. On
+`/meta` and `/status` it means "secman has not pushed yet", which is a normal
+state with a friendly screen. On `/enroll` it means the device registry is full,
+and on the login routes it means the relay cannot issue a nonce right now —
+neither of which has anything to do with secman. `RelayClient` decides which
+reading applies from the route, not from the status code alone.
+
+## What the app signs
+
+Two responses carry a `signingInput` / `bindingInput` field. They are a
+convenience, **not** an instruction: the app reconstructs the same string from
+`RelayProtocol` and refuses the operation if the two disagree. A client that
+signs whatever the server sends has handed out a signing oracle for the one key
+that identifies the device. See `Sources/SecmanRelayKit/RelayProtocol.swift`.
+
+| Purpose | Bytes signed |
+|---|---|
+| Per-session authentication | `secman-relay-device-auth-v1\|<deviceId>\|<nonce>` |
+| Device binding | `secman-relay-device-bind-v1\|<nonce>\|<sha256 hex of SPKI DER>` |
+
+The two prefixes are domain separation: a signature made for a binding must
+never be replayable as a session authentication. For GitHub the `<nonce>` is the
+*ticket*, because the state travels through a browser and must not double as the
+challenge.
 
 ---
 
@@ -170,6 +195,34 @@ costs a fresh round trip and cannot be brute-forced against one challenge.
 ## Reads
 
 All require `Authorization: Bearer <accessToken>`.
+
+### `GET /api/v1/meta`
+
+Freshness and entitlements, without the payload. The app polls this on every
+refresh and only fetches `/status` when `generatedAt` has moved, so a phone that
+wakes up between secman pushes downloads a few hundred bytes rather than the
+whole snapshot.
+
+```json
+{
+  "instanceId": "secman-prod",
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-09T12:00:00Z",
+  "receivedAt": "2026-08-09T12:00:01Z",
+  "ageSeconds": 42,
+  "stale": false,
+  "maxAgeSeconds": 900,
+  "sections": ["kpis", "imports"],
+  "deviceId": "dev_2f1c…",
+  "subject": "markus",
+  "roles": ["ADMIN"],
+  "scopes": ["status:*"]
+}
+```
+
+`maxAgeSeconds` is the relay's own staleness threshold, so the app's "no update
+in the last 15 minutes" banner quotes the deployment's number instead of a
+constant compiled into the client.
 
 ### `GET /api/v1/session`
 

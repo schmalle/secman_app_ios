@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // SecmanRelayKit is the whole security surface of the app: the Secure Enclave
 // key, the relay protocol, and the three sign-in flows. It is a library rather

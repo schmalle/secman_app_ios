@@ -373,6 +373,217 @@ struct SectionTests {
     }
 }
 
+// MARK: - Presentation
+
+@Suite("Timestamps inside sections")
+struct RelayTimestampTests {
+
+    /// `importedAt` and `lastCalculatedAt` come out of MariaDB as zone-less
+    /// `LocalDateTime` and secman deliberately does not stamp a zone on them.
+    /// The app must keep them as written rather than "helpfully" converting.
+    @Test("a zone-less server time is kept as written")
+    func serverLocal() throws {
+        let stamp = try #require(RelayTimestamp("2026-08-24T06:15:03"))
+        #expect(stamp.isServerLocal)
+        guard case .serverLocal(let components) = stamp else {
+            Issue.record("expected a server-local timestamp")
+            return
+        }
+        #expect(components.year == 2026)
+        #expect(components.month == 8)
+        #expect(components.day == 24)
+        #expect(components.hour == 6)
+        #expect(components.minute == 15)
+        #expect(components.second == 3)
+        #expect(components.nanosecond == 0)
+    }
+
+    /// `DateTimeFormatter.ISO_LOCAL_DATE_TIME` prints seconds and a fraction
+    /// only when they are non-zero, so all of these are the same producer.
+    @Test(arguments: [
+        ("2026-08-24T06:15", 0, 0),
+        ("2026-08-24T06:15:03", 3, 0),
+        ("2026-08-24T06:15:03.5", 3, 500_000_000),
+        ("2026-08-24T06:15:03.123456", 3, 123_456_000),
+        ("2026-08-24T06:15:03.123456789", 3, 123_456_789)
+    ])
+    func localVariants(_ text: String, second: Int, nanosecond: Int) throws {
+        let stamp = try #require(RelayTimestamp(text))
+        guard case .serverLocal(let components) = stamp else {
+            Issue.record("expected a server-local timestamp for \(text)")
+            return
+        }
+        #expect(components.second == second)
+        #expect(components.nanosecond == nanosecond)
+    }
+
+    @Test("an RFC 3339 instant is an instant, not a server time")
+    func instant() throws {
+        let stamp = try #require(RelayTimestamp("2026-08-24T06:15:03Z"))
+        #expect(!stamp.isServerLocal)
+        guard case .instant(let date) = stamp else {
+            Issue.record("expected an instant")
+            return
+        }
+        #expect(date == RelayJSON.parseRFC3339("2026-08-24T06:15:03Z"))
+    }
+
+    @Test(arguments: [
+        "", "yesterday", "2026-08-24", "06:15:03",
+        "2026-13-01T00:00:00", "2026-08-32T00:00:00", "2026-08-24T24:00:00", "2026-08-24T06:60:00",
+        "2026-08-24T06:15:03.", "2026-08-24T06:15:03.1234567890", "2026-08-24T06:15:03.12a"
+    ])
+    func rejectsGarbage(_ text: String) {
+        #expect(RelayTimestamp(text) == nil)
+    }
+
+    /// The rendering is locale-dependent, so the check is only that the digits
+    /// the server wrote are the digits shown — no zone shift crept in.
+    @Test("the display text carries the server's digits")
+    func displayText() throws {
+        let stamp = try #require(RelayTimestamp("2026-08-24T23:15:03"))
+        let text = stamp.displayText
+        #expect(text.contains("2026"))
+        #expect(text.contains("15"))
+        // 23:15 in 24-hour locales, 11:15 PM in 12-hour ones — never 22 or 00.
+        #expect(text.contains("23") || text.contains("11"))
+    }
+}
+
+@Suite("Formatting")
+struct RelayFormatTests {
+
+    /// Locale decides the separator and the spacing before "%", so the checks
+    /// are about the digits and the precision, not the exact string.
+    @Test("percentages keep one decimal")
+    func percent() {
+        let text = RelayFormat.percent(92.44)
+        #expect(text.contains("92"))
+        #expect(text.contains("%"))
+        #expect(!text.contains("92.44") && !text.contains("92,44"))
+        #expect(RelayFormat.percent(100).contains("100"))
+    }
+
+    @Test("sub-minute durations are given in seconds, not as 0m")
+    func shortDurations() {
+        #expect(RelayFormat.duration(seconds: 0) == "0s")
+        #expect(RelayFormat.duration(seconds: 42) == "42s")
+        #expect(RelayFormat.duration(seconds: -5) == "0s")
+        #expect(!RelayFormat.duration(seconds: 59).contains("m"))
+    }
+
+    @Test("longer durations carry hours and minutes")
+    func longDurations() {
+        let text = RelayFormat.duration(seconds: 5400)
+        #expect(text.contains("1"))
+        #expect(text.contains("30"))
+        #expect(RelayFormat.duration(seconds: 900).contains("15"))
+    }
+
+    @Test("ages read as prose")
+    func ages() {
+        #expect(RelayFormat.age(seconds: 12) == "just now")
+        #expect(RelayFormat.age(seconds: 600).hasSuffix(" ago"))
+    }
+
+    @Test("scopes collapse the wildcard and strip the prefix")
+    func scopes() {
+        #expect(RelayFormat.scopes(["status:*"]) == "all sections")
+        #expect(RelayFormat.scopes(["status:*", "status:kpis"]) == "all sections")
+        #expect(RelayFormat.scopes(["status:kpis", "status:imports"]) == "imports, kpis")
+        #expect(RelayFormat.scopes(["other"]) == "other")
+        #expect(RelayFormat.scopes([]) == "none")
+    }
+}
+
+@Suite("Section highlights")
+struct HighlightTests {
+
+    private func makeSnapshot(_ sections: String) throws -> RelaySnapshot {
+        try RelayJSON.decoder.decode(RelaySnapshot.self, from: Data("""
+        {"instanceId":"secman-prod","schemaVersion":2,"generatedAt":"2026-08-24T06:15:03Z",
+         "ageSeconds":10,"stale":false,"roles":["ADMIN"],"sections":\(sections)}
+        """.utf8))
+    }
+
+    @Test("each known section yields the one number worth glancing at")
+    func allSections() throws {
+        let snapshot = try makeSnapshot("""
+        {"totals":{"assets":12043,"vulnerabilities":88211,"users":64},
+         "kpis":{"awsCleanServers":{"available":true,"percentage":92.4},
+                 "edrCoverage":{"available":true,"percentage":97.5}},
+         "exceptions":{"pending":14},
+         "imports":{"crowdstrike":{"available":true,"errorCount":3}},
+         "top-products":{"items":[{"name":"nginx","vulnerabilities":1204},{"name":"curl","vulnerabilities":9}]},
+         "top-servers":{"items":[]}}
+        """)
+
+        let totals = try #require(snapshot.highlight(for: RelaySectionID("totals")))
+        #expect(totals.text.hasSuffix(" vulnerabilities"))
+        #expect(totals.tone == .neutral)
+
+        let kpis = try #require(snapshot.highlight(for: RelaySectionID("kpis")))
+        #expect(kpis.text.hasPrefix("AWS "))
+        #expect(kpis.text.contains("EDR "))
+        #expect(kpis.tone == .neutral)
+
+        let exceptions = try #require(snapshot.highlight(for: RelaySectionID("exceptions")))
+        #expect(exceptions.text == "14 pending")
+        #expect(exceptions.tone == .attention)
+
+        let imports = try #require(snapshot.highlight(for: RelaySectionID("imports")))
+        #expect(imports.text == "3 errors")
+        #expect(imports.tone == .problem)
+
+        let products = try #require(snapshot.highlight(for: RelaySectionID("top-products")))
+        #expect(products.text.hasPrefix("nginx · "))
+
+        let servers = try #require(snapshot.highlight(for: RelaySectionID("top-servers")))
+        #expect(servers.text == "empty")
+    }
+
+    /// "Not measured yet" and "0%" mean opposite things, and the quiet state
+    /// of a healthy deployment should not shout.
+    @Test("quiet states are neutral; unmeasured ones ask for attention")
+    func quietAndUnmeasured() throws {
+        let snapshot = try makeSnapshot("""
+        {"kpis":{"awsCleanServers":{"available":false},
+                 "edrCoverage":{"available":true,"percentage":97.5}},
+         "exceptions":{"pending":0},
+         "imports":{"crowdstrike":{"available":true,"errorCount":0}}}
+        """)
+
+        #expect(snapshot.highlight(for: RelaySectionID("kpis"))?.tone == .attention)
+        #expect(snapshot.highlight(for: RelaySectionID("exceptions")) == RelaySectionHighlight(text: "none pending", tone: .neutral))
+        #expect(snapshot.highlight(for: RelaySectionID("imports")) == RelaySectionHighlight(text: "no errors", tone: .neutral))
+
+        let noImport = try makeSnapshot("""
+        {"imports":{"crowdstrike":{"available":false}}}
+        """)
+        #expect(noImport.highlight(for: RelaySectionID("imports")) == RelaySectionHighlight(text: "no import yet", tone: .attention))
+    }
+
+    /// A highlight is a convenience. Anything the app cannot summarise — an
+    /// unknown section, a missing one, or a known name with an unexpected
+    /// shape — simply has no trailing text; the detail view still renders it.
+    @Test("nothing is invented for unknown, absent or reshaped sections")
+    func nilCases() throws {
+        let snapshot = try makeSnapshot("""
+        {"supply-chain":{"score":7},"exceptions":{"pending":"many"}}
+        """)
+        #expect(snapshot.highlight(for: RelaySectionID("supply-chain")) == nil)
+        #expect(snapshot.highlight(for: RelaySectionID("totals")) == nil)
+        #expect(snapshot.highlight(for: RelaySectionID("exceptions")) == nil)
+    }
+
+    @Test("every built-in section has a blurb")
+    func blurbs() {
+        for section in RelaySection.allCases {
+            #expect(!section.blurb.isEmpty)
+        }
+    }
+}
+
 // MARK: - Helpers
 
 private extension Data {

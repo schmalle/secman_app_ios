@@ -58,13 +58,18 @@ and reviewed without reading SwiftUI.
 | `RelaySession.swift` | The binding and session protocol end to end, plus the Keychain device record |
 | `SignInProviders.swift` | Apple, Google (OAuth + PKCE, no SDK) and the relay-hosted GitHub flow |
 | `RelayModels.swift` | Wire types; snapshot sections stay as opaque JSON |
+| `RelayPresentation.swift` | Zone-aware timestamps, number formatting, and the per-section highlight for the list — pure functions, unit-tested |
 | `SPKI.swift` | DER encoding for certificate pinning, and a SHA-256 usable without CryptoKit |
 | `RelayError.swift` | One error type, with "can signing in again fix this?" as an explicit property |
 
 ### `App/SecmanApp`
 
 SwiftUI, one target for iPhone and iPad. `AppModel` is the only state holder;
-views read from it and never call the client directly.
+views read from it and never call the client directly. Besides the data it
+tracks three pieces of *state about the data* — when the relay last answered,
+whether the last attempt failed to reach it, and whether the snapshot was
+refused for its schema — because each of those changes what the numbers on
+screen mean. [`UI.md`](UI.md) walks the screens.
 
 ## Two decisions worth explaining
 
@@ -103,9 +108,9 @@ AppModel.refresh()
  │    └─ if the token is expired: challenge → sign (Face ID) → token
  ├─ GET /api/v1/session   → identity: name, provider     → settings
  │                          (first refresh only — it does not change)
- ├─ GET /api/v1/meta      → freshness, which sections     → sidebar
- └─ GET /api/v1/status    → the sections themselves       → detail
-      only when meta.generatedAt has moved since the copy in memory
+ ├─ GET /api/v1/meta      → freshness, which sections     → list, banners
+ └─ GET /api/v1/status    → the sections themselves       → highlights, detail
+      only when (instanceId, generatedAt) differs from the last fetch
 ```
 
 Only the first request in a steady-state refresh is guaranteed to happen.
@@ -114,25 +119,45 @@ which does not change while the app is running, so it is fetched once. `/meta`
 is a few hundred bytes and is fetched every time, because both freshness and
 entitlements move underneath the app: a snapshot ages, and a role edit in secman
 takes effect on the very next request. `/status` is the only large response the
-app ever downloads, and it is skipped entirely when `generatedAt` matches the
-copy already in memory.
+app ever downloads, and it is skipped when the relay still holds the snapshot
+already in memory — or the one this build already refused for its schema.
+
+Four things trigger a refresh:
+
+| Trigger | Prompts for Face ID? |
+|---|---|
+| Launch | if the token has lapsed |
+| Return from the background | if the token has lapsed — deliberately, see SECURITY.md §7 |
+| Pull to refresh | if the token has lapsed |
+| Foreground poll, every 60 s while the app is on screen | **never**: `refreshQuietly()` returns without doing anything once the token has lapsed |
+
+The poll matches secman's default publish interval. It is a `Task.sleep` loop
+keyed on "signed in and the scene is active", so backgrounding cancels it. It
+never prompts because a biometric sheet that appears on its own, on a schedule,
+is the one people learn to approve without looking.
 
 ## Failure states, and why each is distinct
 
 | Condition | What the user sees |
 |---|---|
 | No relay configured | setup screen |
-| Relay unreachable | "could not be reached", previous data retained in memory |
+| Relay unreachable | red "relay unreachable for 3 min" banner; the previous data stays on screen with its own, still-ticking age |
 | Not yet enrolled | sign-in screen |
 | Enrolled, token expired | silent re-authentication (one Face ID prompt) |
 | Device revoked, or principal removed | "not permitted" — signing in again is *not* offered, because it cannot help |
 | Relay has no snapshot | "waiting for secman", the shell still renders |
-| Snapshot older than the threshold | data shown, with an orange age banner |
-| Relay speaks a newer schema | "update the app" — refuses to render a version it does not understand |
+| Snapshot older than the threshold | data shown, with an orange age banner quoting the relay's threshold |
+| Relay speaks a newer schema | persistent "update the app" banner and detail state — not an alert that flashes and falls back to "waiting for secman", which would be a lie |
+| A KPI has never been calculated | "not calculated yet", never 0% |
 
 The distinction between "your session expired" (retry silently) and "you are not
 permitted" (a human must change something in secman) is load-bearing: conflating
 them produces an app that loops the sign-in sheet forever against a revocation.
+
+The same goes for the three banners. "Unreachable" is the phone's problem and
+may be a tunnel; "stale" is the relay reporting that secman's publisher has gone
+quiet; "update the app" is neither and clears only with a release. Each names
+the system that needs attention.
 
 ## Platform requirements
 

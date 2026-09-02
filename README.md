@@ -33,14 +33,38 @@ name and rendered as labelled rows straight from the JSON. A client that quietly
 dropped what it did not recognise would hide data the user is entitled to, and
 the bug would be indistinguishable from a permissions problem.
 
+## What the screens show
+
+The list is a dashboard, not a menu. Its first row says how old the status is
+and when the app last asked; each section carries the one number worth a glance
+— pending exceptions, import errors, the two KPI percentages — coloured only
+when something needs a human. Three banners cover the states that change what
+the numbers mean: **relay unreachable** (red; the last data stays on screen,
+still aged), **data is stale** (orange; the relay's own threshold), and
+**update the app** (the relay speaks a newer status format). They repeat inside
+every section on iPhone, where the list is off screen.
+
+Section screens show the counts behind each percentage, when secman last
+calculated it, and a *Source* block with the snapshot's generated and received
+times. Timestamps from inside secman's database carry no zone and are shown as
+written, captioned "server local time", rather than converted into something
+that looks precise and is wrong by hours.
+
+[`docs/UI.md`](docs/UI.md) maps every element to the relay field it comes from.
+
 ## Light on the wire
 
 Steady-state refresh is one small request. `GET /api/v1/meta` is a few hundred
 bytes and carries what the shell needs — how old the snapshot is, which sections
 are readable — and the full `/status` payload is fetched only when the relay's
-`generatedAt` has actually moved. secman pushes every fifteen minutes or so and
-a phone wakes up rather more often than that, so most refreshes never download
-the snapshot at all.
+`generatedAt` has actually moved. secman pushes about once a minute (its default
+`secman.relay.publish-interval`), and the relay flags a snapshot stale once it
+is older than `RELAY_SNAPSHOT_MAX_AGE` (fifteen minutes by default) — the app
+quotes that number rather than compiling in its own.
+
+While the app is on screen it polls `/meta` on the same one-minute cadence. The
+poll never raises Face ID: once the fifteen-minute access token lapses it waits
+for the user's next interaction instead of prompting on its own.
 
 Nothing is persisted: no snapshot on disk, no access token, no cache.
 
@@ -115,14 +139,16 @@ runtime with its own networking and update cadence in a security product.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit, and why the app cannot reach secman
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, the sign-in protocol in detail, and the security test matrix
 - [`docs/SETUP.md`](docs/SETUP.md) — provisioning: Apple, Google, GitHub, the relay, and the app
-- [`docs/API.md`](docs/API.md) — the relay endpoints this app uses
+- [`docs/API.md`](docs/API.md) — the relay endpoints this app uses, and the field semantics the screens rely on
+- [`docs/UI.md`](docs/UI.md) — every screen, element by element, with the relay field behind each
 
 The relay itself is documented in the secman repository at `docs/RELAY.md`.
 
 ## Status
 
-**The Swift sources have not been compiled.** They were authored in an
-environment with no Swift toolchain and no Xcode, so the first
+**The Swift sources have not been compiled.** They were authored — and the
+freshness, highlight and KPI-semantics work was added — in an environment with
+no Swift toolchain and no Xcode, so the first
 `xcodegen generate && swift build` is part of review, not a formality. The
 protocol is not guesswork — every wire format, signing input and status code
 here was read out of `src/relay` in the secman repository — but "matches the

@@ -27,6 +27,17 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
 
+    /// What the foreground poll keys on: it runs only while signed in and on
+    /// screen, and restarts from zero whenever either changes.
+    private struct PollKey: Equatable {
+        let signedIn: Bool
+        let active: Bool
+    }
+
+    private var pollKey: PollKey {
+        PollKey(signedIn: model.phase == .signedIn, active: scenePhase == .active)
+    }
+
     var body: some View {
         Group {
             switch model.phase {
@@ -46,6 +57,18 @@ struct RootView: View {
             // resuming a stale token. It costs one Face ID prompt and removes
             // "the app was left open on a desk" as a threat.
             if phase == .active { Task { await model.refreshIfNeeded() } }
+        }
+        .task(id: pollKey) {
+            // While the app is on screen, ask /meta for news about once a
+            // minute — secman's own push cadence. The poll never prompts: once
+            // the fifteen-minute token lapses it waits for the user instead of
+            // raising Face ID on its own.
+            guard pollKey.signedIn, pollKey.active else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: AppModel.foregroundRefreshInterval)
+                guard !Task.isCancelled else { return }
+                await model.refreshQuietly()
+            }
         }
         .alert(
             "Something went wrong",

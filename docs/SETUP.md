@@ -218,6 +218,11 @@ openssl s_client -connect relay.example.com:443 </dev/null 2>/dev/null \
 4. Demote the user in secman, pull to refresh → the section disappears without
    re-signing in.
 5. Revoke the device from secman → the next refresh fails and stays failed.
+6. Leave the list on screen for two minutes → the "Status from" age keeps
+   ticking and "Checked" resets about once a minute without a Face ID prompt.
+7. Stop the publisher (`SECMAN_RELAY_ENABLED=false`, restart) and wait past
+   `RELAY_SNAPSHOT_MAX_AGE` → the orange stale banner appears with the age,
+   quoting the relay's own threshold; the numbers remain.
 
 Then work through the full matrix in [`SECURITY.md`](SECURITY.md) §10.
 
@@ -233,4 +238,8 @@ Then work through the full matrix in [`SECURITY.md`](SECURITY.md) §10.
 | Google sheet opens then errors | Reversed client id missing from `CFBundleURLSchemes`. |
 | GitHub returns to the app with `error=` | Callback URL mismatch between the GitHub app and `RELAY_GITHUB_REDIRECT_URI`. |
 | "Waiting for secman" forever | The relay is up but no push has landed. Check `GET /api/relay/status` in secman. |
+| "Update the app" banner | The relay serves a newer `schemaVersion` than this build. Ship the newer app; nothing on the relay or in secman needs changing. |
+| "Relay unreachable" banner | The phone cannot reach the relay's mobile port — tunnel, ALB, DNS. The relay's own log will show nothing, because nothing arrived. |
+| A KPI shows "not calculated yet" | secman has never computed it: no CrowdStrike import yet, or none since the KPI was introduced. Run an import or the admin refresh. |
+| Import times look a few hours off | They are secman's server-local clock, shown as written and captioned so. This is deliberate — see `UI.md` §6. |
 | Everything 403s after a role change | Expected while the principal push is in flight; at most one publish interval. |

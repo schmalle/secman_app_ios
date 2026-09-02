@@ -203,6 +203,14 @@ user is entitled to, and the bug would look identical to a permissions problem.
   vulnerability counts are not in a screenshot of a locked phone.
 - Returning from the background re-authenticates rather than resuming a token,
   which removes "left open on a desk" as a threat for one Face ID prompt.
+- The foreground poll (every 60 s while the app is on screen) **never prompts**.
+  Once the fifteen-minute token lapses it does nothing until the user's next
+  interaction. A biometric sheet that appears on its own, on a schedule, is the
+  one people learn to approve without looking — and would let anyone holding an
+  unlocked phone keep the session alive indefinitely by leaving the app open.
+- Stale and unreachable states are labelled on every screen, including inside
+  a section on iPhone where the list is off screen. A number that looks current
+  and is forty minutes old is the one thing a status app must not produce.
 - The Keychain item is `WhenUnlockedThisDeviceOnly`: it does not travel in an
   iCloud backup and cannot confuse a restored device into thinking it is already
   enrolled.
@@ -269,3 +277,7 @@ relay-side equivalents are automated in `src/relay/internal/api/api_test.go`.
 | 18 | MITM with a trusted-root proxy, pins configured | connection refused |
 | 19 | MITM with a trusted-root proxy, pins empty | connects — expected; document that pinning is the control |
 | 20 | Restore a device backup onto another phone | not enrolled; the enclave key did not travel |
+| 21 | Leave the app open on screen for 20 minutes | no Face ID prompt appears on its own; the "checked" line stops advancing once the token lapses and resumes on the next tap |
+| 22 | Open a section on iPhone, then cut the network | the red "relay unreachable" banner appears inside the section; the numbers stay, with their age still ticking |
+| 23 | Point the app at a relay serving `schemaVersion: 3` (via proxy) | a persistent "update the app" banner and detail state; no "waiting for secman", no alert loop |
+| 24 | Sign in as a user whose device scope is narrowed to one section | Settings shows the scope by name; the list shows only that section |

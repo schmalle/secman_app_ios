@@ -199,9 +199,11 @@ All require `Authorization: Bearer <accessToken>`.
 ### `GET /api/v1/meta`
 
 Freshness and entitlements, without the payload. The app polls this on every
-refresh and only fetches `/status` when `generatedAt` has moved, so a phone that
-wakes up between secman pushes downloads a few hundred bytes rather than the
-whole snapshot.
+refresh — including a foreground poll every 60 seconds — and only fetches
+`/status` when `generatedAt` has moved, so a phone that wakes up between secman
+pushes downloads a few hundred bytes rather than the whole snapshot. secman's
+default publish interval is also 60 seconds, so a poll usually does find news;
+the saving is on the many wake-ups that fall between two pushes.
 
 ```json
 {
@@ -220,9 +222,12 @@ whole snapshot.
 }
 ```
 
-`maxAgeSeconds` is the relay's own staleness threshold, so the app's "no update
-in the last 15 minutes" banner quotes the deployment's number instead of a
-constant compiled into the client.
+`maxAgeSeconds` is the relay's own staleness threshold (`RELAY_SNAPSHOT_MAX_AGE`,
+15 minutes by default), so the app's "no update in the last 15 minutes" banner
+quotes the deployment's number instead of a constant compiled into the client.
+`receivedAt` is the relay's clock when the push landed; the app shows it next
+to `generatedAt` because the gap between them is the one thing a phone can say
+about the publisher.
 
 ### `GET /api/v1/session`
 
@@ -305,7 +310,48 @@ Section bodies are opaque to the relay and re-served byte for byte, so secman
 can add a field without a relay or app release. The app decodes each section
 lazily for the same reason.
 
----
+### Field semantics the screens rely on
+
+The relay does not interpret these; secman defines them and the app labels
+them accordingly. Read from `RelaySnapshotBuilder` and the services behind it.
+
+**Timestamps inside a section are zone-less.** `importedAt` and
+`lastCalculatedAt` are `LocalDateTime` values secman reads from MariaDB and
+deliberately does not stamp with a zone (`RelaySnapshotBuilder.isoLocal`), e.g.
+`2026-08-24T06:15:03`. The app shows them as written, captioned "server local
+time". Envelope timestamps (`generatedAt`, `receivedAt`, `expiresAt`) are RFC
+3339 instants and are shown in the device's zone.
+
+**`kpis.awsCleanServers`** — percentage of AWS servers (assets with an EC2
+instance id) that have no open, non-excepted finding older than 30 days.
+Installer artifacts are excluded. Since secman's August 2026 change the age is
+measured from `COALESCE(first_seen_at, scan_timestamp)`, where `first_seen_at`
+is anchored to the date a fix became available when secman knows one
+(`secman.vulnerability.use-patch-publication-date`, now on by default) and to
+detection otherwise. Two consequences the app's footer states: re-imaging a host
+does not reset the clock, and the number can drop on the first import after a
+secman upgrade because a patch date is usually earlier than a detection date.
+
+**`kpis.edrCoverage`** — `percentage` is `coveredInstances / eligibleInstances`,
+where eligible is `totalInstances` minus instances holding an approved "No EDR
+possible" exception (`excludedByException`), and covered means CrowdStrike
+reported the sensor within `agentSeenWithinDays`. `totalInstances` is published
+so the effect of exemptions stays visible; the app shows it.
+
+**`available: false`** on either KPI means "never calculated" — a fresh install,
+or no CrowdStrike import since the signal was introduced. The app renders "not
+calculated yet" and never a percentage, because 0% would read as an outage.
+
+**`imports.crowdstrike.errorCount`** counts hosts that failed during the run.
+Since the August 2026 reconcile fixes a host whose fetch failed is excluded from
+the post-import sweep, so its previous findings are kept rather than deleted as
+remediated; the app's footer says so.
+
+**`exceptions.pending`** is the count of vulnerability exception requests in the
+`PENDING` state — the same number the web UI's approval badge shows.
+
+**`top-products` / `top-servers`** are the ten-entry lists the admin summary
+mail sends, ranked by vulnerability count.
 
 ## Not in this API
 

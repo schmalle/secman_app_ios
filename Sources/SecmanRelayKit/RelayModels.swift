@@ -322,6 +322,17 @@ public struct RelayTopListSection: Codable, Sendable {
     public let items: [Item]
 }
 
+/// `integrations` — requires ADMIN.
+public struct RelayIntegrationsSection: Codable, Sendable {
+    public let scanners: Int
+    public let totalSubjects: Int
+    public let healthySubjects: Int
+    public let failedSubjects: Int
+    public let unscannedSubjects: Int
+    public let staleSubjects: Int
+    public let openFindings: Int
+}
+
 // MARK: - Section identifiers
 
 /// The sections `RelaySnapshotBuilder` publishes today, and the roles secman
@@ -339,6 +350,7 @@ public enum RelaySection: String, CaseIterable, Sendable {
     case imports
     case topProducts = "top-products"
     case topServers = "top-servers"
+    case integrations
 
     public var displayName: String {
         switch self {
@@ -348,6 +360,7 @@ public enum RelaySection: String, CaseIterable, Sendable {
         case .imports: return "Imports"
         case .topProducts: return "Top products"
         case .topServers: return "Top servers"
+        case .integrations: return "Integrations"
         }
     }
 
@@ -359,13 +372,14 @@ public enum RelaySection: String, CaseIterable, Sendable {
         case .imports: return "arrow.down.circle"
         case .topProducts: return "shippingbox"
         case .topServers: return "server.rack"
+        case .integrations: return "checkmark.arrow.trianglehead.counterclockwise"
         }
     }
 }
 
 /// A section the relay says this device may read.
 ///
-/// The name comes from the server, always. `known` is non-nil for the six
+/// The name comes from the server, always. `known` is non-nil for the seven
 /// sections this build renders with a purpose-built view; for anything else the
 /// app still lists it and still shows its contents, just generically. That is
 /// the difference between "the relay grew a section" being a release and being

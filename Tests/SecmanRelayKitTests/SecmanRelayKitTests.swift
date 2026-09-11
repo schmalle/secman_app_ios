@@ -179,6 +179,23 @@ struct DecodingTests {
         #expect(try snapshot.decode(RelayTotalsSection.self, section: "absent") == nil)
     }
 
+    @Test("the integration section decodes and has a stable navigation position")
+    func integrationSection() throws {
+        let snapshot = try decode(RelaySnapshot.self, """
+        {"instanceId":"a","schemaVersion":2,"generatedAt":"2026-08-09T12:00:00Z",
+         "ageSeconds":0,"stale":false,
+         "sections":{"integrations":{"scanners":3,"totalSubjects":8,"healthySubjects":6,
+         "failedSubjects":1,"unscannedSubjects":1,"staleSubjects":2,"openFindings":12}}}
+        """)
+
+        let integrations = try snapshot.decode(RelayIntegrationsSection.self, section: "integrations")
+        #expect(integrations?.scanners == 3)
+        #expect(integrations?.openFindings == 12)
+        #expect(RelaySectionID("integrations").displayName == "Integrations")
+        #expect(RelaySectionID("top-servers") < RelaySectionID("integrations"))
+        #expect(RelaySectionID("integrations") < RelaySectionID("unknown-future-section"))
+    }
+
     /// Counts must survive the round trip through the opaque-section
     /// representation as integers. Routed through `Double` they come back as
     /// "3.0" on screen, and stop being exact past 2^53.

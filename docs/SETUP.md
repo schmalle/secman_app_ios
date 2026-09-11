@@ -212,7 +212,7 @@ openssl s_client -connect relay.example.com:443 </dev/null 2>/dev/null \
 
 ## 7. Verify
 
-1. Launch, sign in with Apple as a linked ADMIN → all six sections.
+1. Launch, sign in with Apple as a linked ADMIN → all seven sections.
 2. Sign in as a linked VULN user → only **Imports**.
 3. Try GitHub as an ADMIN → refused, with the "use Apple or Google" message.
 4. Demote the user in secman, pull to refresh → the section disappears without

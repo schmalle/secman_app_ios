@@ -237,7 +237,7 @@ Who this device is and what it may read. The app builds its navigation from
   "scopes": ["status:*"],
   "boundVia": "identity",
   "provider": "apple",
-  "sections": ["exceptions", "imports", "kpis", "top-products", "top-servers", "totals"]
+  "sections": ["exceptions", "imports", "integrations", "kpis", "top-products", "top-servers", "totals"]
 }
 ```
 
@@ -255,7 +255,9 @@ The snapshot, already filtered to what this device may read.
   "roles": ["ADMIN"],
   "sections": {
     "totals": { "assets": 12043, "vulnerabilities": 88211, "users": 64 },
-    "kpis": { "awsCleanServers": { "available": true, "percentage": 92.4, … } }
+    "kpis": { "awsCleanServers": { "available": true, "percentage": 92.4, … } },
+    "integrations": { "scanners": 3, "totalSubjects": 8, "healthySubjects": 6,
+      "failedSubjects": 1, "unscannedSubjects": 1, "staleSubjects": 2, "openFindings": 12 }
   }
 }
 ```

@@ -5,7 +5,7 @@ import SwiftUI
 ///
 /// A `NavigationSplitView` so the same code is a sidebar on iPad and a stack on
 /// iPhone. The list is built from the relay's answer to "what may this device
-/// read" — so a user with only VULN sees one entry and an admin sees six, with
+/// read" — so a user with only VULN sees one entry and an admin sees seven, with
 /// no client-side role logic anywhere.
 struct StatusView: View {
     @Environment(AppModel.self) private var model
@@ -206,6 +206,21 @@ struct SectionDetailView: View {
                     ForEach(list.items) { item in
                         MetricRow(title: item.name, value: item.vulnerabilities.formatted())
                     }
+                }
+            }
+
+        case .integrations:
+            typed(RelayIntegrationsSection.self, from: snapshot) { integrations in
+                Section("Coverage") {
+                    MetricRow(title: "Scanners", value: integrations.scanners.formatted())
+                    MetricRow(title: "Subjects", value: integrations.totalSubjects.formatted())
+                    MetricRow(title: "Healthy", value: integrations.healthySubjects.formatted())
+                    MetricRow(title: "Failed", value: integrations.failedSubjects.formatted())
+                        .foregroundStyle(integrations.failedSubjects > 0 ? Color.red : Color.primary)
+                    MetricRow(title: "Unscanned", value: integrations.unscannedSubjects.formatted())
+                    MetricRow(title: "Stale", value: integrations.staleSubjects.formatted())
+                        .foregroundStyle(integrations.staleSubjects > 0 ? Color.orange : Color.primary)
+                    MetricRow(title: "Open findings", value: integrations.openFindings.formatted())
                 }
             }
 

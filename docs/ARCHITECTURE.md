@@ -89,7 +89,7 @@ authorization rule is a second chance to get it wrong, and the client's copy is
 the one an attacker controls.
 
 Unfiltered includes section names this build has never seen. `RelaySection` maps
-the six secman publishes today to a title, an icon and a purpose-built view;
+the seven secman publishes today to a title, an icon and a purpose-built view;
 `RelaySectionID` wraps whatever the server actually said, and anything without a
 match renders generically from the opaque JSON. Dropping the unrecognised ones
 would hide data the user is entitled to, and the resulting blank space is
